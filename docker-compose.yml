@@ -10,13 +10,17 @@
 #   MLflow   http://localhost:5000
 #   Airflow  http://localhost:8080  (airflow / airflow)
 #
-# TODO: Complete the mlflow service. Everything else is provided — read the
-#       airflow-common block, it is where the interesting decisions are.
+# On Linux, run `echo "AIRFLOW_UID=$(id -u)" > .env` once before the first
+# `up`, so the Airflow containers can write to the bind-mounted logs/ and
+# artifacts/ directories (macOS and Windows do not need it).
 # =============================================================================
 x-airflow-common: &airflow-common
   build:
     context: .
     dockerfile: docker/airflow.Dockerfile
+  # Official Airflow pattern: run as the host user (group 0) so files written to
+  # the bind mounts are owned by you, not by an unknown uid 50000.
+  user: "${AIRFLOW_UID:-50000}:0"
   environment: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
@@ -43,19 +47,9 @@ services:
   # ---------------------------------------------------------------------------
   # MLflow tracking server + model registry
   # ---------------------------------------------------------------------------
-  # TODO: Configure the MLflow tracking server.
-  #
-  # Requirements:
-  #   image        ghcr.io/mlflow/mlflow:v2.19.0
-  #   ports        5000 -> 5000
-  #   volumes      the named volume mlflow_data mounted at /mlflow
-  #   command      mlflow server
-  #                  --backend-store-uri sqlite:////mlflow/mlflow.db
-  #                  --default-artifact-root /mlflow/artifacts
-  #                  --host 0.0.0.0 --port 5000
-  #   healthcheck  hit /health, every 15s, 10s timeout, 5 retries,
-  #                20s start_period
-  #   restart      unless-stopped
+  # Backend store (runs, params, metrics, registry) in SQLite and artifacts
+  # (models, JSON reports) under /mlflow/artifacts — both on the named volume
+  # mlflow_data, so `docker compose down` (without -v) keeps the history.
   #
   # Note the FOUR slashes in sqlite:////mlflow/mlflow.db. Three is a relative
   # path, four is absolute. With three, the database lands wherever the process
@@ -67,11 +61,30 @@ services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.19.0
     container_name: ddm501-mlflow
-    # TODO: ports
-    # TODO: volumes
-    # TODO: command
-    # TODO: healthcheck
-    # TODO: restart
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    # Artifacts are PROXIED: clients upload over HTTP and the server writes them
+    # to /mlflow/artifacts on the volume. A plain `--default-artifact-root
+    # /mlflow/artifacts` would hand that path to every client, which then tries
+    # to write to its OWN /mlflow (on the host: "Read-only file system: '/mlflow'";
+    # in the Airflow containers: permission denied).
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --serve-artifacts
+      --artifacts-destination /mlflow/artifacts
+      --default-artifact-root mlflow-artifacts:/
+      --host 0.0.0.0 --port 5000
+    healthcheck:
+      # The image has no curl or wget; its Python is enough to hit /health.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
 
   # ---------------------------------------------------------------------------
   # Airflow metadata database

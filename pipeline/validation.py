@@ -1,7 +1,14 @@
 """
 Data validation stage — the quality gate in front of training.
 
-TODO: Complete the three level functions and the orchestrator.
+Three levels, each returning a list of error strings so that one run reports
+every problem at once:
+
+  schema      are the expected columns present, with numeric types?
+  statistics  enough rows, few enough missing values, a plausible target rate?
+  semantics   do the values mean what the business says they mean?
+
+validate_dataset collects all three into a report and raises on failure.
 """
 
 import logging
@@ -14,6 +21,7 @@ from pipeline.config import (
     MAX_POSITIVE_RATE,
     MIN_POSITIVE_RATE,
     MIN_ROWS,
+    PAY_AMT_FEATURES,
     RAW_FEATURES,
     TARGET,
 )
@@ -40,7 +48,7 @@ RANGES: Dict[str, tuple] = {
 
 
 # =============================================================================
-# TODO 1: Implement validate_schema — level 1
+# 1. validate_schema — level 1
 # =============================================================================
 # "Is the data shaped the way the code expects?"
 #
@@ -52,24 +60,29 @@ RANGES: Dict[str, tuple] = {
 # Return errors rather than raising, so the caller can collect all three levels
 # and report them together. A validator that stops at the first problem makes
 # you fix issues one deploy at a time.
-#
-# Hint: pd.api.types.is_numeric_dtype(df[col])
 
 def validate_schema(df: pd.DataFrame) -> List[str]:
     """Level 1 — are the expected columns present, with usable types?"""
-    # TODO: implement
-    #
-    # errors = []
-    # missing = [c for c in ??? if c not in df.columns]
-    # if missing:
-    #     errors.append(f"missing columns: {missing}")
-    # ...
-    # return errors
-    return []
+    errors: List[str] = []
+    expected = RAW_FEATURES + [TARGET]
+
+    missing = [c for c in expected if c not in df.columns]
+    if missing:
+        errors.append(f"missing columns: {missing}")
+
+    # Only type-check what is there; a missing column is already reported above.
+    non_numeric = [
+        f"{c} ({df[c].dtype})"
+        for c in expected
+        if c in df.columns and not pd.api.types.is_numeric_dtype(df[c])
+    ]
+    if non_numeric:
+        errors.append(f"non-numeric columns: {non_numeric}")
+    return errors
 
 
 # =============================================================================
-# TODO 2: Implement validate_statistics — level 2
+# 2. validate_statistics — level 2
 # =============================================================================
 # "Is the shape of the distribution what training assumes?"
 #
@@ -85,12 +98,31 @@ def validate_schema(df: pd.DataFrame) -> List[str]:
 
 def validate_statistics(df: pd.DataFrame) -> List[str]:
     """Level 2 — is the shape of the data what training assumes?"""
-    # TODO: implement
-    return []
+    errors: List[str] = []
+
+    if len(df) < MIN_ROWS:
+        errors.append(f"too few rows: {len(df)} < {MIN_ROWS}")
+
+    missing_fraction = df.isna().mean()
+    too_sparse = missing_fraction[missing_fraction > MAX_MISSING_FRACTION]
+    for col, frac in too_sparse.items():
+        errors.append(
+            f"column {col} is {frac:.1%} missing (max {MAX_MISSING_FRACTION:.0%})"
+        )
+
+    # Mean of a non-numeric target is meaningless; schema level reports that one.
+    if TARGET in df.columns and pd.api.types.is_numeric_dtype(df[TARGET]):
+        positive_rate = float(df[TARGET].mean())
+        if not MIN_POSITIVE_RATE <= positive_rate <= MAX_POSITIVE_RATE:
+            errors.append(
+                f"target positive rate {positive_rate:.3f} outside "
+                f"[{MIN_POSITIVE_RATE}, {MAX_POSITIVE_RATE}]"
+            )
+    return errors
 
 
 # =============================================================================
-# TODO 3: Implement validate_semantics — level 3
+# 3. validate_semantics — level 3
 # =============================================================================
 # "Do the values mean what the business says they mean?"
 #
@@ -104,12 +136,34 @@ def validate_statistics(df: pd.DataFrame) -> List[str]:
 
 def validate_semantics(df: pd.DataFrame) -> List[str]:
     """Level 3 — do the values mean what the business says they mean?"""
-    # TODO: implement
-    return []
+    errors: List[str] = []
+
+    for col, allowed in DOMAINS.items():
+        if col not in df.columns:
+            continue
+        bad = set(df[col].dropna().unique()) - allowed
+        if bad:
+            shown = sorted(bad, key=str)[:10]
+            errors.append(f"{col} has values outside {sorted(allowed)}: {shown}")
+
+    for col, (lo, hi) in RANGES.items():
+        if col not in df.columns or not pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        n_bad = int((~df[col].dropna().between(lo, hi)).sum())
+        if n_bad:
+            errors.append(f"{col} has {n_bad} values outside [{lo}, {hi}]")
+
+    for col in PAY_AMT_FEATURES:
+        if col not in df.columns or not pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        n_negative = int((df[col] < 0).sum())
+        if n_negative:
+            errors.append(f"{col} has {n_negative} negative payments")
+    return errors
 
 
 # =============================================================================
-# TODO 4: Implement validate_dataset
+# 4. validate_dataset
 # =============================================================================
 # Requirements:
 #   - run all three levels and concatenate their errors
@@ -125,5 +179,29 @@ def validate_semantics(df: pd.DataFrame) -> List[str]:
 
 def validate_dataset(df: pd.DataFrame, raise_on_error: bool = True) -> Dict[str, Any]:
     """Run all three levels and return a report."""
-    # TODO: implement
-    pass
+    schema_errors = validate_schema(df)
+    statistical_errors = validate_statistics(df)
+    semantic_errors = validate_semantics(df)
+    all_errors = schema_errors + statistical_errors + semantic_errors
+
+    report: Dict[str, Any] = {
+        "passed": not all_errors,
+        "n_rows": int(len(df)),
+        "n_columns": int(df.shape[1]),
+        "schema_errors": schema_errors,
+        "statistical_errors": statistical_errors,
+        "semantic_errors": semantic_errors,
+        "n_errors": len(all_errors),
+    }
+
+    for err in all_errors:
+        logger.error("validation: %s", err)
+
+    if all_errors and raise_on_error:
+        raise DataValidationError(
+            f"{len(all_errors)} validation error(s): " + "; ".join(all_errors)
+        )
+
+    if not all_errors:
+        logger.info("Validation passed: %s rows x %s columns", len(df), df.shape[1])
+    return report

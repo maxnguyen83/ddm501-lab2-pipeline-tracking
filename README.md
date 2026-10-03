@@ -11,35 +11,50 @@ promoted automatically.
 Same credit default problem as Lab 1. Same data. The question changes from
 *does it serve?* to *can you reproduce it, compare it, and decide about it?*
 
-**This is the starter repository.** The skeleton, the data, `config.py`,
-`data_ingestion.py` and `run_pipeline.py` are done. The stages that make it a
-pipeline are marked `TODO`.
+All TODOs are complete. The team report — pipeline design, experiment
+analysis, the promotion decision, orchestration and reproducibility — is in
+[`docs/REPORT.md`](docs/REPORT.md) (PDF: `docs/REPORT.pdf`).
 
 ---
 
-## What you have to complete
+## What was built, and by whom
 
-| File | TODOs | What it is |
-|---|---|---|
-| `pipeline/validation.py` | 4 | The three-level data quality gate |
-| `pipeline/preprocessing.py` | 2 | Derived features and the ColumnTransformer |
-| `pipeline/training.py` | 1 | MLflow tracking around the fit |
-| `pipeline/evaluation.py` | 3 | Metrics, per-group metrics, fairness gap |
-| `pipeline/registry.py` | 5 | Best run, register, alias, quality gate, promotion |
-| `dags/credit_training_dag.py` | 6 | Five task bodies and the dependency graph |
-| `tests/test_pipeline.py` | 5 classes | Everything except `TestDataIngestion` |
-| `docker/airflow.Dockerfile` | 3 | User, constrained install, PYTHONPATH |
-| `docker-compose.yml` | 1 | The MLflow service |
+| File | Task | Owner | What it is |
+|---|---|---|---|
+| `pipeline/validation.py` | 1 | Ducmanh2212 | The three-level data quality gate |
+| `pipeline/preprocessing.py` | 2 | Ducmanh2212 | Derived features and the ColumnTransformer |
+| `pipeline/training.py` | 3 | hieunt-fsb-ai | MLflow tracking around the fit, training-data fingerprint |
+| `pipeline/evaluation.py` | 4 | hieunt-fsb-ai | Metrics, per-group metrics, fairness gap |
+| `pipeline/registry.py` | 5 | thientd2609 | Best run, register, alias, quality gate, promotion |
+| `experiments/` | 6 | thientd2609 | Sweep, leaderboard, `--promote-best`, bootstrap analysis |
+| `dags/credit_training_dag.py` | 7 | maxnguyen83 | Five task bodies and the dependency graph |
+| `docker/airflow.Dockerfile`, `docker-compose.yml` | 8 | maxnguyen83 | The Airflow image and the MLflow service |
+| `tests/` | — | each owner | One test module per stage (see Tests) |
 
-Read these before you start — they are the worked examples:
-`pipeline/config.py`, `pipeline/data_ingestion.py`, `pipeline/run_pipeline.py`,
-the `ingest` and `cleanup` tasks in the DAG, `beats_champion` and the helper
-functions in `registry.py`, and `TestDataIngestion` in the test file.
+**Definition of done: `.github/workflows/smoke.yml`.** It runs the tests, runs
+the pipeline, asserts a model reached `@champion`, runs the sweep, then installs
+Airflow and parses the DAG. Both jobs were replayed step by step on Python 3.11
+and pass (71 tests, 99% coverage of `pipeline/`).
 
-**You are done when `.github/workflows/smoke.yml` passes.** It runs the pipeline,
-asserts a model reached the `@champion` alias, runs the sweep, then installs
-Airflow and parses the DAG. That workflow is the specification; this README is
-the explanation.
+### Results in one table
+
+| Run | ROC AUC | PR AUC | Fairness gap | Registry |
+|---|---|---|---|---|
+| logreg-01 (best AUC) | 0.7511 | 0.5534 | 0.0558 | v2 **rejected** — gap over 0.05 |
+| hgb default (CLI) | 0.7473 | 0.5444 | 0.0306 | v1 **@champion** |
+| hgb default (weekly DAG) | 0.7473 | 0.5444 | 0.0306 | v3 **@challenger** — ties v1, no 0.002 gain |
+
+The AUC differences between all seven sweep runs are inside the bootstrap
+noise; logistic regression's wider fairness gap is not. The reasoning is in
+the report, section 3.
+
+| Evidence | File |
+|---|---|
+| Airflow graph, promote branch | `docs/screenshots/airflow-graph-promote.png` |
+| Airflow graph, skip branch | `docs/screenshots/airflow-graph-skip.png` |
+| MLflow runs | `docs/screenshots/mlflow-runs.png`, `docs/screenshots/mlflow-compare-sweep.png` |
+| MLflow registry (aliases + gate tags) | `docs/screenshots/mlflow-registry.png` |
+| Logged artifacts of the champion run | `docs/screenshots/mlflow-champion-artifacts.png` |
 
 ---
 
@@ -53,6 +68,8 @@ all call the same functions — the DAG orchestrates, it never reimplements.
 ---
 
 ## Quick start
+
+Tested on Python 3.11 (CI) and 3.12 (local).
 
 ```bash
 python -m venv .venv
@@ -80,6 +97,13 @@ Sweep the hyperparameter grid and print a leaderboard:
 ```bash
 python -m experiments.run_experiments
 python -m experiments.run_experiments --leaderboard-only --top 5
+
+# Is the ranking real? Paired bootstrap over the test set, plus the baselines
+# the gate is calibrated on (PAY_0 rule, actual default-rate gap by SEX).
+python -m experiments.analyse_sweep
+
+# Send the best run by ROC AUC through the same gate the pipeline uses.
+python -m experiments.run_experiments --leaderboard-only --promote-best
 ```
 
 ---
@@ -93,7 +117,12 @@ docker compose up -d --build
 # Airflow  http://localhost:8080   (airflow / airflow)
 ```
 
-Unpause `credit_default_training` in the Airflow UI and trigger it. Seven tasks:
+On Linux, run `echo "AIRFLOW_UID=$(id -u)" > .env` once first so the Airflow
+containers can write to `logs/` and `artifacts/`.
+
+Unpause `credit_default_training` in the Airflow UI and trigger it. A manual
+trigger can pick the model family with the run config `{"model_type": "logreg"}`;
+the schedule uses `MODEL_TYPE` (default `hgb`). Seven tasks:
 
 | Task | Does |
 |---|---|
@@ -101,7 +130,7 @@ Unpause `credit_default_training` in the Airflow UI and trigger it. Seven tasks:
 | `validate` | Schema, statistics and semantics. Raises and stops the DAG on failure |
 | `train` | Fit the pipeline inside an MLflow run |
 | `evaluate` | Aggregate metrics, per-group metrics, fairness gap — all logged |
-| `decide` | Branch on the quality gate |
+| `decide` | Branch on the quality gate; tags the MLflow run `quality_gate: passed/failed` |
 | `promote_model` / `skip_promotion` | Register and alias, or do nothing |
 | `cleanup` | Remove the run directory down whichever branch ran |
 
@@ -154,22 +183,29 @@ Two aliases are used here: `@champion` is what a serving layer would load,
 `promote_model` never promotes on accuracy alone. Three checks, all must pass:
 
 ```
-roc_auc    >= 0.70
-pr_auc     >= 0.45
-fairness_gap <= 0.10
+roc_auc      >= 0.72     # the one-feature rule "sort by PAY_0" scores 0.711
+pr_auc       >= 0.48     # the same rule scores 0.446
+fairness_gap <= 0.05     # actual default-rate gap by SEX is 0.031-0.039, + ~1 SE
 ```
 
 and then the candidate must beat the current champion by a margin of 0.002 —
 without the margin, noise triggers deployments.
+
+These are our thresholds, not the starter's (0.70 / 0.45 / 0.10, which every
+sweep candidate passed). They are calibrated on baselines, not on the
+leaderboard; `python -m experiments.analyse_sweep` prints both baselines. All
+three can be overridden with `MIN_ROC_AUC`, `MIN_PR_AUC` and `MAX_FAIRNESS_GAP`.
 
 The fairness check is the interesting one. `fairness_gap` is the largest
 difference in *selection rate* (the share of applicants sent to review or
 decline) between demographic groups. A model can be the most accurate candidate
 in the sweep and still be refused promotion here.
 
-Run the sweep and look at the leaderboard: logistic regression usually posts the
-best ROC AUC **and** the widest fairness gap. Deciding what to do about that is
-the point of the exercise, and Session 6 gives you the vocabulary for it.
+On our run, logistic regression posts the best ROC AUC (0.7511) **and** the
+widest fairness gap (0.0558). Its AUC lead over the boosting model is inside the
+bootstrap noise (95% CI of the difference [−0.0023, +0.0097]); its extra gap is
+not ([+0.015, +0.035]). The gate rejects it, and we keep gradient boosting as
+the champion — see the report, section 3.
 
 ---
 
@@ -187,13 +223,15 @@ the point of the exercise, and Session 6 gives you the vocabulary for it.
 │   ├── registry.py         Register, alias, quality gate, promotion
 │   └── run_pipeline.py     CLI entry point
 ├── experiments/
-│   └── run_experiments.py  Grid sweep + leaderboard
+│   ├── run_experiments.py  Grid sweep + leaderboard + --promote-best
+│   └── analyse_sweep.py    Paired bootstrap: are leaderboard gaps real?
 ├── dags/
 │   └── credit_training_dag.py
 ├── docker/
 │   └── airflow.Dockerfile
 ├── data/credit_default.csv Committed — the lab needs no network
-├── tests/test_pipeline.py
+├── tests/                  One module per stage + conftest.py
+├── docs/REPORT.md          Team report (and REPORT.pdf, screenshots/)
 ├── docker-compose.yml
 ├── requirements.txt
 └── requirements-airflow.txt
@@ -207,14 +245,24 @@ the point of the exercise, and Session 6 gives you the vocabulary for it.
 pytest tests/ -v --cov=pipeline --cov-report=term-missing
 ```
 
-| Class | Asserts |
-|---|---|
-| `TestDataIngestion` | The split is stratified, reproducible, and leaks nothing |
-| `TestValidation` | Every category of bad data is caught and stops the run |
-| `TestPreprocessing` | Derived features are correct; the transformer lives inside the Pipeline |
-| `TestTraining` | Every model type builds and fits; params override defaults |
-| `TestEvaluation` | Metrics are in range and internally consistent; slices cover everyone |
-| `TestQualityGate` | An accurate but unfair model is rejected; a missing metric fails closed |
+The five required classes are split one module per stage, so each stage's
+tests sit with the person who owns that stage. Shared fixtures are in
+`tests/conftest.py`; MLflow tests use a throwaway file store.
+
+| Class | Module | Asserts |
+|---|---|---|
+| `TestDataIngestion` | `test_pipeline.py` | The split is stratified, reproducible, and leaks nothing |
+| `TestValidation` | `test_validation.py` | Every category of bad data is caught and stops the run |
+| `TestPreprocessing` | `test_preprocessing.py` | Derived features are correct; the transformer lives inside the Pipeline |
+| `TestTraining` | `test_training.py` | Every model type builds and fits; params override defaults; the run logs what rebuilds it |
+| `TestEvaluation` | `test_evaluation.py` | Metrics are in range and internally consistent; slices cover everyone |
+| `TestQualityGate`, `TestRegistry` | `test_registry.py` | An accurate but unfair model is rejected; a missing metric fails closed; champion / challenger / rejected end to end |
+| `TestSweep`, `TestSweepAnalysis` | `test_experiments.py` | Each config is its own run; the leaderboard is ordered; the bootstrap behaves |
+| `TestDagStructure`, `TestDecide`, `TestDagRun` | `test_dag.py` | The graph, the branch ids, scalar-only XCom, cleanup down both branches |
+| `TestRunPipeline` | `test_run_pipeline.py` | The CLI end to end, with and without the registry |
+
+`test_dag.py` runs without Airflow installed (it stubs the three Airflow classes
+the DAG imports); with Airflow installed the same assertions run on the real DAG.
 
 `test_split_is_reproducible` looks trivial and is not. Without a fixed seed,
 every metric comparison in MLflow measures split noise as much as model
@@ -247,11 +295,28 @@ A stub whose body is `pass` returns `None`, and pytest counts that as a pass.
 Delete the `pass` as you implement each test.
 
 **`airflow dags list` shows the DAG but the graph in the UI is a flat row**
-You have not wired the dependencies yet — TODO 6 at the bottom of the DAG file.
+The dependencies are not wired — see block 6 at the bottom of the DAG file.
 
 **Every experiment run gets the same metrics**
 Check that you are passing the sweep's parameters into `train_model`. It is easy
 to build the config dict and never use it — the runs then differ only by name.
+
+**`cannot import name 'FallbackAsyncAdaptedQueuePool'`**
+SQLAlchemy 2.1 with MLflow 2.19 — any `sqlite:///` or `postgresql://` store
+fails. `requirements.txt` pins `SQLAlchemy==2.0.36`; reinstall from it.
+
+**`OSError: [Errno 30] Read-only file system: '/mlflow'` when logging to the server**
+The server was started with a plain `--default-artifact-root /mlflow/artifacts`,
+which makes every client write to its own `/mlflow`. Our compose file proxies
+artifacts through the server instead (`--serve-artifacts`,
+`--artifacts-destination /mlflow/artifacts`). An experiment created under the
+old setting keeps its old artifact location: `docker compose down -v` and start
+again.
+
+**Tasks stay "running" at 100% CPU when Airflow runs natively on macOS**
+`setproctitle` hangs inside the forked task process on recent macOS versions
+(seen with 1.3.3 and 1.3.8). The Linux image is not affected — run the DAG
+through `docker compose`, not a local Airflow install.
 
 **The DAG runs but nothing appears in MLflow**
 Inside the compose network the tracking server is `http://mlflow:5000`, not

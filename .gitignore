@@ -9,6 +9,7 @@ env/
 # Testing
 .pytest_cache/
 .coverage
+.coverage.*
 coverage.xml
 htmlcov/
 
@@ -22,8 +23,9 @@ models/*.joblib
 artifacts/*
 !artifacts/.gitkeep
 
-# Airflow
-logs/
+# Airflow (keep the empty logs/ dir: compose bind-mounts it)
+logs/*
+!logs/.gitkeep
 .airflow/
 airflow.db
 airflow.cfg

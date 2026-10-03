@@ -101,10 +101,22 @@ EXPERIMENT_GRID = [
 # A model is only promoted to champion if it clears these. Writing the gate down
 # is what turns "we looked at the numbers and it seemed fine" into something a
 # scheduled pipeline can decide on its own at 3 a.m.
+#
+# The thresholds are the team's choice, calibrated on baselines rather than on
+# the leaderboard (python -m experiments.analyse_sweep prints them):
+#   MIN_ROC_AUC / MIN_PR_AUC  clear the one-feature rule "sort by PAY_0"
+#                             (roc_auc 0.711, pr_auc 0.446 on the test split)
+#                             by a visible margin — otherwise a model adds cost
+#                             and no skill.
+#   MAX_FAIRNESS_GAP          the gap in ACTUAL default rate between SEX groups
+#                             (0.031 train, 0.039 test) plus about one standard
+#                             error of the gap estimate (~0.011). A wider
+#                             selection-rate gap amplifies the difference in
+#                             outcomes rather than reflecting it.
 PRIMARY_METRIC = "roc_auc"
-MIN_ROC_AUC = float(os.getenv("MIN_ROC_AUC", 0.70))
-MIN_PR_AUC = float(os.getenv("MIN_PR_AUC", 0.45))
-MAX_FAIRNESS_GAP = float(os.getenv("MAX_FAIRNESS_GAP", 0.10))
+MIN_ROC_AUC = float(os.getenv("MIN_ROC_AUC", 0.72))
+MIN_PR_AUC = float(os.getenv("MIN_PR_AUC", 0.48))
+MAX_FAIRNESS_GAP = float(os.getenv("MAX_FAIRNESS_GAP", 0.05))
 
 # Decision thresholds, kept identical to Lab 1 so the two labs agree.
 REVIEW_THRESHOLD = float(os.getenv("REVIEW_THRESHOLD", 0.30))

@@ -13,6 +13,11 @@ pyarrow==18.1.0
 
 # Experiment tracking and model registry (client + local file store)
 mlflow==2.19.0
+# mlflow 2.19 allows sqlalchemy<3 but its SQL store imports a pool class that
+# SQLAlchemy 2.1 removed: any sqlite:/// or postgresql:// backend fails with
+# "cannot import name 'FallbackAsyncAdaptedQueuePool'". Same version as the
+# ghcr.io/mlflow/mlflow:v2.19.0 server image.
+SQLAlchemy==2.0.36
 
 # Configuration
 python-dotenv==1.0.1

@@ -7,8 +7,9 @@ ALIASES instead — a named pointer to one version, repointed atomically.
     champion    what the serving layer loads
     challenger  a candidate that passed the gate and is waiting for a decision
 
-TODO: Complete find_best_run, register_model, set_alias, passes_quality_gate
-      and promote_model.
+promote_model applies the quality gate, registers the version whatever the
+outcome (a rejected version is the audit trail), and only moves @champion when
+the candidate passes the gate AND beats the current champion by a margin.
 """
 
 import logging
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # =============================================================================
 # =============================================================================
-# TODO 1: Implement find_best_run
+# 1. find_best_run
 # =============================================================================
 # Return the best run in an experiment by a single metric, as:
 #   {"run_id": str, "metrics": dict, "params": dict, "artifact_uri": str}
@@ -43,7 +44,6 @@ logger = logging.getLogger(__name__)
 #   - raise ValueError if the experiment does not exist, or has no matching runs
 #   - order by the metric, ASC when ascending is True, DESC otherwise
 #   - max_results=1
-#
 
 def find_best_run(
     experiment_name: str = MLFLOW_EXPERIMENT_NAME,
@@ -51,12 +51,35 @@ def find_best_run(
     ascending: bool = False,
 ) -> Dict[str, Any]:
     """Best run in an experiment by a single metric."""
-    # TODO: implement
-    pass
+    client = MlflowClient()
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        raise ValueError(f"Experiment '{experiment_name}' does not exist")
+
+    order = "ASC" if ascending else "DESC"
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        order_by=[f"metrics.{metric} {order}"],
+        max_results=1,
+    )
+    # MLflow sorts runs that lack the metric last, so if the top run has no
+    # value, no run does (e.g. every run crashed before evaluation).
+    if not runs or metric not in runs[0].data.metrics:
+        raise ValueError(f"No runs with metric '{metric}' in experiment '{experiment_name}'")
+
+    best = runs[0]
+    logger.info("Best run by %s: %s (%.4f)", metric, best.info.run_id,
+                best.data.metrics[metric])
+    return {
+        "run_id": best.info.run_id,
+        "metrics": dict(best.data.metrics),
+        "params": dict(best.data.params),
+        "artifact_uri": best.info.artifact_uri,
+    }
 
 
 # =============================================================================
-# TODO 2: Implement register_model
+# 2. register_model
 # =============================================================================
 # Register a run's model artifact and return the new version number as a string.
 #
@@ -64,21 +87,22 @@ def register_model(
     run_id: str, model_name: str = REGISTERED_MODEL_NAME, artifact_path: str = "model"
 ) -> str:
     """Register a run's model artifact and return the new version number."""
-    # TODO: implement
-    pass
+    model_uri = f"runs:/{run_id}/{artifact_path}"
+    mv = mlflow.register_model(model_uri=model_uri, name=model_name)
+    logger.info("Registered %s as %s v%s", model_uri, model_name, mv.version)
+    return str(mv.version)
 
 
 # =============================================================================
-# TODO 3: Implement set_alias
+# 3. set_alias
 # =============================================================================
 # Point an alias at a version. This replaces the deprecated
 # client.transition_model_version_stage() — do not use that one.
-#
 
 def set_alias(model_name: str, version: str, alias: str) -> None:
     """Point an alias at a version."""
-    # TODO: implement
-    pass
+    MlflowClient().set_registered_model_alias(model_name, alias, str(version))
+    logger.info("%s@%s -> v%s", model_name, alias, version)
 
 
 def get_model_version_by_alias(
@@ -101,7 +125,7 @@ def get_model_version_by_alias(
 
 # =============================================================================
 # =============================================================================
-# TODO 4: Implement passes_quality_gate
+# 4. passes_quality_gate
 # =============================================================================
 # Three independent checks; a model must clear all three:
 #     roc_auc      >= MIN_ROC_AUC
@@ -118,12 +142,28 @@ def get_model_version_by_alias(
 # large. If a missing metric defaulted to a pass, a bug that stopped computing
 # the fairness gap would silently disable the fairness check — and the gate
 # would keep reporting green.
-#
 
 def passes_quality_gate(metrics: Dict[str, float]) -> Dict[str, Any]:
     """Does this model clear the promotion bar?"""
-    # TODO: implement
-    pass
+    # Defaults are chosen so that a MISSING metric fails its check: an absent
+    # number is not evidence of quality.
+    roc_auc = metrics.get("roc_auc", 0.0)
+    pr_auc = metrics.get("pr_auc", 0.0)
+    gap = metrics.get("fairness_gap", float("inf"))
+
+    detail = {
+        "roc_auc": {"passed": bool(roc_auc >= MIN_ROC_AUC),
+                    "value": float(roc_auc),
+                    "rule": f"roc_auc >= {MIN_ROC_AUC}"},
+        "pr_auc": {"passed": bool(pr_auc >= MIN_PR_AUC),
+                   "value": float(pr_auc),
+                   "rule": f"pr_auc >= {MIN_PR_AUC}"},
+        "fairness_gap": {"passed": bool(gap <= MAX_FAIRNESS_GAP),
+                         "value": float(gap),
+                         "rule": f"fairness_gap <= {MAX_FAIRNESS_GAP}"},
+    }
+    failed = [name for name, check in detail.items() if not check["passed"]]
+    return {"passed": not failed, "failed_checks": failed, "detail": detail}
 
 
 def beats_champion(
@@ -151,7 +191,7 @@ def beats_champion(
 
 # =============================================================================
 # =============================================================================
-# TODO 5: Implement promote_model
+# 5. promote_model
 # =============================================================================
 # Register the run, then decide what alias it deserves. Three outcomes, and only
 # the first changes what production serves:
@@ -167,7 +207,6 @@ def beats_champion(
 #     model was caught rather than never produced.
 #   - tag the version: client.set_model_version_tag(name, version, "quality_gate", ...)
 #   - return {"run_id", "model_name", "version", "outcome", "quality_gate", "metrics"}
-#
 
 def promote_model(
     run_id: str,
@@ -175,8 +214,39 @@ def promote_model(
     model_name: str = REGISTERED_MODEL_NAME,
 ) -> Dict[str, Any]:
     """Register a run, then decide what alias it deserves."""
-    # TODO: implement
-    pass
+    gate = passes_quality_gate(metrics)
+
+    # Register first, whatever the gate says: a rejected version is the audit
+    # trail that shows the bad model was caught rather than never produced.
+    version = register_model(run_id, model_name)
+    client = MlflowClient()
+    client.set_model_version_tag(model_name, version, "quality_gate",
+                                 "passed" if gate["passed"] else "failed")
+    if gate["failed_checks"]:
+        client.set_model_version_tag(model_name, version, "failed_checks",
+                                     ",".join(gate["failed_checks"]))
+
+    if not gate["passed"]:
+        outcome = "rejected"
+        logger.warning("v%s rejected by the quality gate: %s", version, gate["failed_checks"])
+    elif beats_champion(metrics, model_name):
+        outcome = "champion"
+        set_alias(model_name, version, CHAMPION_ALIAS)
+    else:
+        outcome = "challenger"
+        set_alias(model_name, version, CHALLENGER_ALIAS)
+
+    client.set_model_version_tag(model_name, version, "outcome", outcome)
+    logger.info("%s v%s -> %s", model_name, version, outcome)
+
+    return {
+        "run_id": run_id,
+        "model_name": model_name,
+        "version": version,
+        "outcome": outcome,
+        "quality_gate": gate,
+        "metrics": {k: v for k, v in metrics.items() if isinstance(v, (int, float))},
+    }
 
 
 # =============================================================================

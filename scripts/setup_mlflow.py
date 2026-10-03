@@ -9,11 +9,16 @@ Usage:
 """
 
 import sys
+from pathlib import Path
 
 import mlflow
 from mlflow.tracking import MlflowClient
 
-from pipeline.config import (
+# Run as `python scripts/setup_mlflow.py` from the repo root: make `pipeline`
+# importable without requiring PYTHONPATH to be set first.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from pipeline.config import (  # noqa: E402
     MLFLOW_EXPERIMENT_NAME,
     MLFLOW_TRACKING_URI,
     REGISTERED_MODEL_NAME,

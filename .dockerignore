@@ -1,0 +1,17 @@
+# The Airflow image only needs requirements-airflow.txt; the code is mounted.
+# Without this file the build context includes .venv and mlruns (~200 MB).
+.git
+.github
+.venv
+venv
+**/__pycache__
+.pytest_cache
+.coverage
+mlruns
+mlflow.db
+models
+artifacts
+logs
+docs
+tests
+data

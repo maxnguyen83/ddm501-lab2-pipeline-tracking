@@ -140,3 +140,11 @@ jobs:
             airflow tasks list credit_default_training | grep -qx "$t" \
               || { echo "::error::missing task: $t"; exit 1; }
           done
+
+      - name: Run the DAG tests against the real Airflow
+        run: |
+          # Same assertions as in the pipeline job, but on Airflow's own DAG
+          # objects and inside Airflow's dependency set (numpy 1.24, pandas 2.1).
+          pip install pytest \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.8.4/constraints-3.11.txt"
+          pytest tests/test_dag.py -p no:cacheprovider

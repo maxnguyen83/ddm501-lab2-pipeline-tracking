@@ -8,16 +8,18 @@ Usage:
     python -m experiments.run_experiments
     python -m experiments.run_experiments --model-type hgb
     python -m experiments.run_experiments --top 5
+    python -m experiments.run_experiments --leaderboard-only --promote-best
 """
 
 import argparse
+import json
 import logging
 from typing import Any, Dict, List
 
-from pipeline.config import EXPERIMENT_GRID, PRIMARY_METRIC
+from pipeline.config import EXPERIMENT_GRID, PRIMARY_METRIC, REGISTERED_MODEL_NAME
 from pipeline.data_ingestion import load_and_split, load_raw
 from pipeline.evaluation import evaluate_model
-from pipeline.registry import compare_runs
+from pipeline.registry import compare_runs, find_best_run, promote_model
 from pipeline.training import setup_mlflow, train_model
 from pipeline.validation import validate_dataset
 
@@ -74,12 +76,34 @@ def leaderboard(top: int = 10) -> None:
     print("=" * 86)
 
 
+def promote_best(metric: str = PRIMARY_METRIC) -> Dict[str, Any]:
+    """Send the top run by `metric` through the same gate the pipeline uses.
+
+    Ranking picks the candidate; the quality gate and the champion comparison
+    still decide what alias it gets. The best-scoring run is not automatically
+    the one that ships.
+    """
+    setup_mlflow()
+    best = find_best_run(metric=metric)
+    result = promote_model(best["run_id"], best["metrics"], REGISTERED_MODEL_NAME)
+    gate = result["quality_gate"]
+    print(f"\nbest by {metric}: run {best['run_id'][:12]} "
+          f"({best['params'].get('model_type', '?')}, {metric}={best['metrics'][metric]:.4f})")
+    print(f"registry: {result['model_name']} v{result['version']} -> {result['outcome']}")
+    if not gate["passed"]:
+        print("gate failed: " + json.dumps(
+            {k: gate["detail"][k] for k in gate["failed_checks"]}))
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-type", default=None, choices=["logreg", "rf", "hgb"],
                         help="only run configurations for this model type")
     parser.add_argument("--top", type=int, default=10)
     parser.add_argument("--leaderboard-only", action="store_true")
+    parser.add_argument("--promote-best", action="store_true",
+                        help=f"register the best run by {PRIMARY_METRIC} and apply the gate")
     args = parser.parse_args()
 
     if not args.leaderboard_only:
@@ -89,6 +113,9 @@ def main() -> None:
         run_grid(grid)
 
     leaderboard(args.top)
+
+    if args.promote_best:
+        promote_best()
 
 
 if __name__ == "__main__":
